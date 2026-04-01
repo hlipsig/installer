@@ -3,12 +3,14 @@ package manifests
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/gophercloud/utils/v2/openstack/clientconfig"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -36,6 +38,7 @@ import (
 	ibmcloudtypes "github.com/openshift/installer/pkg/types/ibmcloud"
 	openstacktypes "github.com/openshift/installer/pkg/types/openstack"
 	ovirttypes "github.com/openshift/installer/pkg/types/ovirt"
+	powervctypes "github.com/openshift/installer/pkg/types/powervc"
 	vspheretypes "github.com/openshift/installer/pkg/types/vsphere"
 )
 
@@ -73,6 +76,7 @@ func (o *Openshift) Dependencies() []asset.Asset {
 		&openshift.BaremetalConfig{},
 		new(rhcos.Image),
 		&openshift.AzureCloudProviderSecret{},
+		&OSImageStream{},
 	}
 }
 
@@ -90,20 +94,22 @@ func (o *Openshift) Generate(ctx context.Context, dependencies asset.Parents) er
 	platform := installConfig.Config.Platform.Name()
 	switch platform {
 	case awstypes.Name:
-		ssn, err := installConfig.AWS.Session(ctx)
+		awsconfig, err := installconfigaws.GetConfigWithOptions(ctx, config.WithRegion(installConfig.AWS.Region))
 		if err != nil {
 			return err
 		}
-		creds, err := ssn.Config.Credentials.Get()
+
+		creds, err := awsconfig.Credentials.Retrieve(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to retrieve aws credentials: %w", err)
 		}
+
 		if !installconfigaws.IsStaticCredentials(creds) {
 			switch {
 			case installConfig.Config.CredentialsMode == "":
-				return errors.Errorf("AWS credentials provided by %s are not valid for default credentials mode", creds.ProviderName)
+				return errors.Errorf("AWS credentials provided by %s are not valid for default credentials mode", creds.Source)
 			case installConfig.Config.CredentialsMode != types.ManualCredentialsMode:
-				return errors.Errorf("AWS credentials provided by %s are not valid for %s credentials mode", creds.ProviderName, installConfig.Config.CredentialsMode)
+				return errors.Errorf("AWS credentials provided by %s are not valid for %s credentials mode", creds.Source, installConfig.Config.CredentialsMode)
 			}
 		}
 		cloudCreds = cloudCredsSecretData{
@@ -151,7 +157,7 @@ func (o *Openshift) Generate(ctx context.Context, dependencies asset.Parents) er
 				Base64encodeAPIKey: base64.StdEncoding.EncodeToString([]byte(client.GetAPIKey())),
 			},
 		}
-	case openstacktypes.Name:
+	case openstacktypes.Name, powervctypes.Name:
 		opts := new(clientconfig.ClientOpts)
 		opts.Cloud = installConfig.Config.Platform.OpenStack.Cloud
 		cloud, err := clientconfig.GetCloudFromYAML(opts)
@@ -255,20 +261,22 @@ func (o *Openshift) Generate(ctx context.Context, dependencies asset.Parents) er
 	roleCloudCredsSecretReader := &openshift.RoleCloudCredsSecretReader{}
 	baremetalConfig := &openshift.BaremetalConfig{}
 	rhcosImage := new(rhcos.Image)
+	osImageStream := &OSImageStream{}
 
 	dependencies.Get(
 		cloudCredsSecret,
 		kubeadminPasswordSecret,
 		roleCloudCredsSecretReader,
 		baremetalConfig,
-		rhcosImage)
+		rhcosImage,
+		osImageStream)
 
 	assetData := map[string][]byte{
 		"99_kubeadmin-password-secret.yaml": applyTemplateData(kubeadminPasswordSecret.Files()[0].Data, templateData),
 	}
 
 	switch platform {
-	case awstypes.Name, openstacktypes.Name, vspheretypes.Name, azuretypes.Name, gcptypes.Name, ibmcloudtypes.Name, ovirttypes.Name:
+	case awstypes.Name, openstacktypes.Name, powervctypes.Name, vspheretypes.Name, azuretypes.Name, gcptypes.Name, ibmcloudtypes.Name, ovirttypes.Name:
 		if installConfig.Config.CredentialsMode != types.ManualCredentialsMode {
 			assetData["99_cloud-creds-secret.yaml"] = applyTemplateData(cloudCredsSecret.Files()[0].Data, templateData)
 		}
@@ -294,6 +302,7 @@ func (o *Openshift) Generate(ctx context.Context, dependencies asset.Parents) er
 
 	o.FileList = append(o.FileList, openshiftInstall.Files()...)
 	o.FileList = append(o.FileList, featureGate.Files()...)
+	o.FileList = append(o.FileList, osImageStream.Files()...)
 
 	asset.SortFiles(o.FileList)
 

@@ -9,7 +9,7 @@ inactive_services() {
 
     if [ -f "/etc/assisted/interactive-ui" ]; then
         # interactive workflow
-        services+=" agent-ui.service"
+        services+=" agent-register-infraenv.service agent-ui.service"
     elif [ -f "/etc/assisted/add-nodes.env" ]; then
         # add nodes workflow
         services+=" agent-import-cluster.service agent-register-infraenv.service apply-host-config.service agent-add-node.service"
@@ -53,7 +53,9 @@ check_host_config() {
 
 check_ui() {
     local ui_issue="90_ui-availability"
-    if systemctl is-active --quiet "agent-ui"; then
+    local infraenv_result
+    infraenv_result=$(systemctl show -p Result --value agent-register-infraenv 2>/dev/null)
+    if systemctl is-active --quiet "agent-ui" && [[ "$infraenv_result" == "success" ]]; then
        printf '\\e{green}Please go to \\e{lightgreen}%s\\e{reset}\\e{green} in your browser to continue the installation\\e{reset}' "${AIUI_URL}" | set_issue "${ui_issue}"
     else
        clear_issue "${ui_issue}"

@@ -21,6 +21,7 @@ import (
 	openstackvalidation "github.com/openshift/installer/pkg/types/openstack/validation"
 	"github.com/openshift/installer/pkg/types/ovirt"
 	ovirtvalidation "github.com/openshift/installer/pkg/types/ovirt/validation"
+	"github.com/openshift/installer/pkg/types/powervc"
 	"github.com/openshift/installer/pkg/types/powervs"
 	powervsvalidation "github.com/openshift/installer/pkg/types/powervs/validation"
 	"github.com/openshift/installer/pkg/types/vsphere"
@@ -142,7 +143,7 @@ func validateMachinePoolPlatform(platform *types.Platform, p *types.MachinePoolP
 	platformName := platform.Name()
 	validate := func(n string, value interface{}, validation func(*field.Path) field.ErrorList) {
 		f := fldPath.Child(n)
-		if platformName == n {
+		if platformName == n || (platformName == powervc.Name && n == openstack.Name) {
 			allErrs = append(allErrs, validation(f)...)
 		} else {
 			allErrs = append(allErrs, field.Invalid(f, value, fmt.Sprintf("cannot specify %q for machine pool when cluster is using %q", n, platformName)))
@@ -152,7 +153,9 @@ func validateMachinePoolPlatform(platform *types.Platform, p *types.MachinePoolP
 		allErrs = append(allErrs, awsvalidation.ValidateAMIID(platform.AWS, p.AWS, fldPath.Child("aws"))...)
 	}
 	if p.AWS != nil {
-		validate(aws.Name, p.AWS, func(f *field.Path) field.ErrorList { return awsvalidation.ValidateMachinePool(platform.AWS, p.AWS, f) })
+		validate(aws.Name, p.AWS, func(f *field.Path) field.ErrorList {
+			return awsvalidation.ValidateMachinePool(platform.AWS, p.AWS, pool.Name, f)
+		})
 	}
 	if p.Azure != nil {
 		validate(azure.Name, p.Azure, func(f *field.Path) field.ErrorList {

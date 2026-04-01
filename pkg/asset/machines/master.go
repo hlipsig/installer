@@ -61,6 +61,7 @@ import (
 	nutanixtypes "github.com/openshift/installer/pkg/types/nutanix"
 	openstacktypes "github.com/openshift/installer/pkg/types/openstack"
 	ovirttypes "github.com/openshift/installer/pkg/types/ovirt"
+	powervctypes "github.com/openshift/installer/pkg/types/powervc"
 	powervstypes "github.com/openshift/installer/pkg/types/powervs"
 	powervsdefaults "github.com/openshift/installer/pkg/types/powervs/defaults"
 	vspheretypes "github.com/openshift/installer/pkg/types/vsphere"
@@ -252,6 +253,9 @@ func (m *Master) Generate(ctx context.Context, dependencies asset.Parents) error
 			if err != nil {
 				logrus.Warn(errors.Wrap(err, "failed to filter zone list"))
 			}
+			// Sort the zones by lexical order to ensure CAPI and MAPI machines
+			// are distributed to zones in the same order.
+			slices.Sort(mpool.Zones)
 		}
 
 		pool.Platform.AWS = &mpool
@@ -337,7 +341,7 @@ func (m *Master) Generate(ctx context.Context, dependencies asset.Parents) error
 		}
 		// TODO: IBM: implement ConfigMasters() if needed
 		// ibmcloud.ConfigMasters(machines, clusterID.InfraID, ic.Publish)
-	case openstacktypes.Name:
+	case openstacktypes.Name, powervctypes.Name:
 		mpool := defaultOpenStackMachinePoolPlatform()
 		mpool.Set(ic.Platform.OpenStack.DefaultMachinePlatform)
 		mpool.Set(pool.Platform.OpenStack)
@@ -370,7 +374,7 @@ func (m *Master) Generate(ctx context.Context, dependencies asset.Parents) error
 		}
 
 		if len(mpool.Zones) == 0 {
-			azs, err := client.GetAvailabilityZones(ctx, ic.Platform.Azure.Region, mpool.InstanceType)
+			azs, err := installConfig.Azure.VMAvailabilityZones(ctx, mpool.InstanceType)
 			if err != nil {
 				return errors.Wrap(err, "failed to fetch availability zones")
 			}
@@ -396,7 +400,7 @@ func (m *Master) Generate(ctx context.Context, dependencies asset.Parents) error
 		}
 		pool.Platform.Azure = &mpool
 
-		capabilities, err := client.GetVMCapabilities(ctx, mpool.InstanceType, installConfig.Config.Platform.Azure.Region)
+		capabilities, err := installConfig.Azure.ControlPlaneCapabilities()
 		if err != nil {
 			return err
 		}
@@ -404,8 +408,7 @@ func (m *Master) Generate(ctx context.Context, dependencies asset.Parents) error
 		if err != nil {
 			return err
 		}
-		useImageGallery := installConfig.Azure.CloudName != azuretypes.StackCloud
-		machines, controlPlaneMachineSet, err = azure.Machines(clusterID.InfraID, ic, &pool, rhcosImage.ControlPlane, "master", masterUserDataSecretName, capabilities, useImageGallery, session)
+		machines, controlPlaneMachineSet, err = azure.Machines(clusterID.InfraID, ic, &pool, rhcosImage.ControlPlane, "master", masterUserDataSecretName, capabilities, session)
 		if err != nil {
 			return errors.Wrap(err, "failed to create master machine objects")
 		}
@@ -615,7 +618,7 @@ func (m *Master) Generate(ctx context.Context, dependencies asset.Parents) error
 		machineConfigs = append(machineConfigs, ignIPv6)
 	}
 
-	if installConfig.Config.EnabledFeatureGates().Enabled(features.FeatureGateMultiDiskSetup) {
+	if installConfig.Config.Enabled(features.FeatureGateMultiDiskSetup) {
 		for i, diskSetup := range installConfig.Config.ControlPlane.DiskSetup {
 			var dataDisk any
 			var diskName string

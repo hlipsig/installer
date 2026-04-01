@@ -9,7 +9,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	configv1 "github.com/openshift/api/config/v1"
-	features "github.com/openshift/api/features"
 	"github.com/openshift/installer/pkg/ipnet"
 	"github.com/openshift/installer/pkg/types/aws"
 	"github.com/openshift/installer/pkg/types/azure"
@@ -22,6 +21,7 @@ import (
 	"github.com/openshift/installer/pkg/types/nutanix"
 	"github.com/openshift/installer/pkg/types/openstack"
 	"github.com/openshift/installer/pkg/types/ovirt"
+	"github.com/openshift/installer/pkg/types/powervc"
 	"github.com/openshift/installer/pkg/types/powervs"
 	"github.com/openshift/installer/pkg/types/vsphere"
 )
@@ -45,6 +45,7 @@ var (
 		ibmcloud.Name,
 		nutanix.Name,
 		openstack.Name,
+		powervc.Name,
 		powervs.Name,
 		vsphere.Name,
 	}
@@ -86,6 +87,7 @@ const (
 )
 
 //go:generate go run ../../vendor/sigs.k8s.io/controller-tools/cmd/controller-gen crd:crdVersions=v1 paths=. output:dir=../../data/data/
+//go:generate go run ../../vendor/k8s.io/code-generator/cmd/deepcopy-gen --output-file zz_generated.deepcopy.go ./...
 
 // InstallConfig is the configuration for an OpenShift install.
 type InstallConfig struct {
@@ -199,6 +201,7 @@ type InstallConfig struct {
 	// GCP: "Mint", "Passthrough", "Manual"
 	// IBMCloud: "Manual"
 	// OpenStack: "Passthrough"
+	// PowerVC: "Passthrough"
 	// PowerVS: "Manual"
 	// Nutanix: "Manual"
 	// +optional
@@ -224,6 +227,10 @@ type InstallConfig struct {
 	// E.g. "featureGates": ["FeatureGate1=true", "FeatureGate2=false"].
 	// +optional
 	FeatureGates []string `json:"featureGates,omitempty"`
+
+	// OSImageStream is the global OS Image Stream to be used for all machines in the cluster.
+	// +optional
+	OSImageStream OSImageStream `json:"osImageStream,omitempty"`
 }
 
 // ClusterDomain returns the DNS domain that all records for a cluster must belong to.
@@ -300,6 +307,10 @@ type Platform struct {
 	// +optional
 	OpenStack *openstack.Platform `json:"openstack,omitempty"`
 
+	// PowerVC is the configuration used when installing on Power VC.
+	// +optional
+	PowerVC *powervc.Platform `json:"powervc,omitempty"`
+
 	// PowerVS is the configuration used when installing on Power VS.
 	// +optional
 	PowerVS *powervs.Platform `json:"powervs,omitempty"`
@@ -354,6 +365,9 @@ func (p *Platform) Name() string {
 		return none.Name
 	case p.External != nil:
 		return external.Name
+	// The PowerVC check needs to be performed before the OpenStack check
+	case p.PowerVC != nil:
+		return powervc.Name
 	case p.OpenStack != nil:
 		return openstack.Name
 	case p.VSphere != nil:
@@ -609,14 +623,18 @@ func (c *InstallConfig) EnabledFeatureGates() featuregates.FeatureGate {
 		customFS = featuregates.GenerateCustomFeatures(c.FeatureGates)
 	}
 
-	clusterProfile := GetClusterProfileName()
-	featureSets, ok := features.AllFeatureSets()[clusterProfile]
+	featureSets, ok := FeatureSetsForProfile()
 	if !ok {
-		logrus.Warnf("no feature sets for cluster profile %q", clusterProfile)
+		logrus.Warnf("no feature sets for cluster profile %q", GetClusterProfileName())
 	}
 	fg := featuregates.FeatureGateFromFeatureSets(featureSets, c.FeatureSet, customFS)
 
 	return fg
+}
+
+// Enabled returns true if the given feature gate is enabled in the current feature sets.
+func (c *InstallConfig) Enabled(key configv1.FeatureGateName) bool {
+	return c.EnabledFeatureGates().Enabled(key)
 }
 
 // PublicAPI indicates whether the API load balancer should be public
@@ -645,4 +663,21 @@ func (c *InstallConfig) PublicIngress() bool {
 		return true
 	}
 	return false
+}
+
+// OSImageStream represents the name of an OS Image Stream to use in a pool.
+// +kubebuilder:validation:Enum=rhel-9;rhel-10
+type OSImageStream string
+
+const (
+	// OSImageStreamRHCOS9 represents the RHEL 9 OS Image Stream.
+	OSImageStreamRHCOS9 OSImageStream = "rhel-9"
+	// OSImageStreamRHCOS10 represents the RHEL 10 OS Image Stream.
+	OSImageStreamRHCOS10 OSImageStream = "rhel-10"
+)
+
+// OSImageStreamValues holds the list of valid values a OSImageStream can take.
+var OSImageStreamValues = []OSImageStream{
+	OSImageStreamRHCOS9,
+	OSImageStreamRHCOS10,
 }

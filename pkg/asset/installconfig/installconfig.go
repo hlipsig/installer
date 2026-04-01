@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
@@ -16,10 +17,12 @@ import (
 	icnutanix "github.com/openshift/installer/pkg/asset/installconfig/nutanix"
 	icopenstack "github.com/openshift/installer/pkg/asset/installconfig/openstack"
 	icovirt "github.com/openshift/installer/pkg/asset/installconfig/ovirt"
+	icpowervc "github.com/openshift/installer/pkg/asset/installconfig/powervc"
 	icpowervs "github.com/openshift/installer/pkg/asset/installconfig/powervs"
 	icvsphere "github.com/openshift/installer/pkg/asset/installconfig/vsphere"
 	"github.com/openshift/installer/pkg/types"
 	"github.com/openshift/installer/pkg/types/defaults"
+	"github.com/openshift/installer/pkg/types/gcp"
 	"github.com/openshift/installer/pkg/types/validation"
 )
 
@@ -98,6 +101,7 @@ func (a *InstallConfig) Generate(ctx context.Context, parents asset.Parents) err
 	a.Config.BareMetal = platform.BareMetal
 	a.Config.Ovirt = platform.Ovirt
 	a.Config.PowerVS = platform.PowerVS
+	a.Config.PowerVC = platform.PowerVC
 	a.Config.Nutanix = platform.Nutanix
 
 	defaults.SetInstallConfigDefaults(a.Config)
@@ -131,6 +135,61 @@ func (a *InstallConfig) finishGCP() error {
 		}
 		a.Config.Platform.GCP.Endpoint.ClusterUseOnly = &defaultClusterUseOnly
 	}
+
+	project := a.Config.GCP.ProjectID
+	if a.Config.Platform.GCP.NetworkProjectID != "" {
+		project = a.Config.GCP.NetworkProjectID
+	}
+
+	if a.Config.GCP.FirewallRulesManagement == "" {
+		firewallPermissions, err := icgcp.HasPermission(context.TODO(), project, []string{
+			icgcp.CreateFirewallPermission,
+			icgcp.DeleteFirewallPermission,
+			icgcp.UpdateNetworksPermission,
+		}, a.Config.GCP.Endpoint)
+		if err != nil {
+			return err
+		}
+
+		a.Config.GCP.FirewallRulesManagement = gcp.ManagedFirewallRules
+		if !firewallPermissions {
+			if a.Config.GCP.NetworkProjectID != "" {
+				logrus.Debugf("missing firewall permissions, setting rule management to Unmanaged")
+				a.Config.GCP.FirewallRulesManagement = gcp.UnmanagedFirewallRules
+			} else {
+				logrus.Warnf("missing firewall permissions, add the permissions or set firewall rules management to Unmanaged and create firewall rules")
+			}
+		}
+	}
+
+	return nil
+}
+
+// finishAzure set defaults for Azure platform.
+func (a *InstallConfig) finishAzure() error {
+	defaultConfig := a.Config.Azure.DefaultMachinePlatform
+	session, err := a.Azure.Session()
+	if err != nil {
+		return err
+	}
+	if defaultConfig != nil && defaultConfig.OSDisk.DiskEncryptionSet != nil &&
+		defaultConfig.OSDisk.DiskEncryptionSet.SubscriptionID == "" {
+		a.Config.Azure.DefaultMachinePlatform.OSDisk.DiskEncryptionSet.SubscriptionID = session.Credentials.SubscriptionID
+	}
+
+	if a.Config.ControlPlane != nil && a.Config.ControlPlane.Platform.Azure != nil &&
+		a.Config.ControlPlane.Platform.Azure.OSDisk.DiskEncryptionSet != nil {
+		if a.Config.ControlPlane.Platform.Azure.OSDisk.DiskEncryptionSet.SubscriptionID == "" {
+			a.Config.ControlPlane.Platform.Azure.OSDisk.DiskEncryptionSet.SubscriptionID = session.Credentials.SubscriptionID
+		}
+	}
+
+	for _, compute := range a.Config.Compute {
+		if compute.Platform.Azure != nil && compute.Platform.Azure.OSDisk.DiskEncryptionSet != nil &&
+			compute.Platform.Azure.OSDisk.DiskEncryptionSet.SubscriptionID == "" {
+			compute.Platform.Azure.OSDisk.DiskEncryptionSet.SubscriptionID = session.Credentials.SubscriptionID
+		}
+	}
 	return nil
 }
 
@@ -162,7 +221,10 @@ func (a *InstallConfig) finish(ctx context.Context, filename string) error {
 		}
 	}
 	if a.Config.Azure != nil {
-		a.Azure = icazure.NewMetadata(a.Config.Azure.CloudName, a.Config.Azure.ARMEndpoint)
+		a.Azure = icazure.NewMetadata(a.Config.Azure, a.Config.ControlPlane, &a.Config.Compute[0])
+		if err := a.finishAzure(); err != nil {
+			return err
+		}
 	}
 	if a.Config.GCP != nil {
 		if err := a.finishGCP(); err != nil {
@@ -205,7 +267,7 @@ func (a *InstallConfig) platformValidation(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return icazure.Validate(client, a.Config)
+		return icazure.Validate(client, a.Azure, a.Config)
 	}
 	if a.Config.Platform.GCP != nil {
 		client, err := icgcp.NewClient(ctx, a.Config.GCP.Endpoint)
@@ -234,6 +296,13 @@ func (a *InstallConfig) platformValidation(ctx context.Context) error {
 	}
 	if a.Config.Platform.Ovirt != nil {
 		return icovirt.Validate(a.Config)
+	}
+	// Since PowerVC is a thin platform, allow it to fall through so that it can also test the OpenStack case.
+	if a.Config.Platform.PowerVC != nil {
+		err := icpowervc.Validate(a.Config)
+		if err != nil {
+			return err
+		}
 	}
 	if a.Config.Platform.OpenStack != nil {
 		return icopenstack.Validate(ctx, a.Config)
